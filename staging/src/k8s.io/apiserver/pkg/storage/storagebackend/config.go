@@ -93,6 +93,12 @@ type Config struct {
 	// StorageObjectCountTracker is used to keep track of the total
 	// number of objects in the storage per resource.
 	StorageObjectCountTracker flowcontrolrequest.StorageObjectCountTracker
+
+	// WrapDecodedObject wraps decoded objects with their storage key.
+	// Used by multicluster caching to carry key identity through the
+	// watch.Event boundary where keys are normally lost. nil for
+	// single-cluster deployments.
+	WrapDecodedObject func(obj runtime.Object, key string) runtime.Object
 }
 
 // ConfigForResource is a Config specialized to a particular `schema.GroupResource`

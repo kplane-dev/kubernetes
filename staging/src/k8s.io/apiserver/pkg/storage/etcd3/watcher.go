@@ -79,6 +79,14 @@ type watcher struct {
 	transformer              value.Transformer
 	getCurrentStorageRV      func(context.Context) (uint64, error)
 	getResourceSizeEstimator func() *resourceSizeEstimator
+
+	// wrapDecodedObject wraps a decoded object with its storage key.
+	// Used by multicluster deployments to carry key identity through
+	// the watch.Event boundary where keys are normally lost.
+	wrapDecodedObject func(obj runtime.Object, key string) runtime.Object
+	// pathPrefix is the etcd key prefix (e.g., "/registry/") used to
+	// convert full etcd keys to storage-relative keys.
+	pathPrefix string
 }
 
 // watchChan implements watch.Interface.
@@ -568,12 +576,38 @@ func (wc *watchChan) acceptAll() bool {
 	return wc.internalPred.Empty()
 }
 
+// storageKeyFromPreparedKey strips the etcd prefix from a full etcd key
+// to produce a storage-relative key.
+func (wc *watchChan) storageKeyFromPreparedKey(preparedKey string) string {
+	prefix := strings.TrimSuffix(wc.watcher.pathPrefix, "/")
+	if prefix == "" {
+		return preparedKey
+	}
+	key := strings.TrimPrefix(preparedKey, prefix)
+	if !strings.HasPrefix(key, "/") {
+		key = "/" + key
+	}
+	return key
+}
+
 // transform transforms an event into a result for user if not filtered.
 func (wc *watchChan) transform(e *event) (res *watch.Event, err error) {
 	curObj, oldObj, err := wc.prepareObjs(e)
 	if err != nil {
 		klog.Errorf("failed to prepare current and previous objects: %v", err)
 		return nil, err
+	}
+
+	// Wrap decoded objects with storage key for identity propagation.
+	// Bookmark events have nil objects and are skipped naturally.
+	if wc.watcher.wrapDecodedObject != nil && !e.isProgressNotify {
+		storageKey := wc.storageKeyFromPreparedKey(e.key)
+		if curObj != nil {
+			curObj = wc.watcher.wrapDecodedObject(curObj, storageKey)
+		}
+		if oldObj != nil {
+			oldObj = wc.watcher.wrapDecodedObject(oldObj, storageKey)
+		}
 	}
 
 	switch {

@@ -95,6 +95,11 @@ type store struct {
 
 	collectorMux          sync.RWMutex
 	resourceSizeEstimator *resourceSizeEstimator
+
+	// wrapDecodedObject wraps decoded objects with their storage key.
+	// Used by multicluster caching to carry key identity through the
+	// watch.Event boundary. nil for single-cluster deployments.
+	wrapDecodedObject func(obj runtime.Object, key string) runtime.Object
 }
 
 var _ storage.Interface = (*store)(nil)
@@ -214,6 +219,29 @@ func (s *store) CompactRevision() int64 {
 		return 0
 	}
 	return s.compactor.CompactRevision()
+}
+
+// SetWrapDecodedObject configures the hook that wraps decoded objects with
+// their storage key. This is called by the storage factory when multicluster
+// identity propagation is configured via storagebackend.Config.WrapDecodedObject.
+func (s *store) SetWrapDecodedObject(fn func(obj runtime.Object, key string) runtime.Object) {
+	s.wrapDecodedObject = fn
+	s.watcher.wrapDecodedObject = fn
+	s.watcher.pathPrefix = s.pathPrefix
+}
+
+// storageKeyFromETCDKey strips the etcd prefix from a full etcd key to
+// produce a storage-relative key.
+func (s *store) storageKeyFromETCDKey(etcdKey string) string {
+	prefix := strings.TrimSuffix(s.pathPrefix, "/")
+	if prefix == "" {
+		return etcdKey
+	}
+	key := strings.TrimPrefix(etcdKey, prefix)
+	if !strings.HasPrefix(key, "/") {
+		key = "/" + key
+	}
+	return key
 }
 
 // Versioner implements storage.Interface.Versioner.
@@ -849,6 +877,11 @@ func (s *store) GetList(ctx context.Context, key string, opts storage.ListOption
 					return aggregator.Err()
 				}
 				continue
+			}
+
+			// Notify callback of decoded item and its storage key for identity resolution.
+			if cb := decodeCallbackFromContext(ctx); cb != nil {
+				cb(obj, s.storageKeyFromETCDKey(string(kv.Key)), kv.ModRevision)
 			}
 
 			// being unable to set the version does not prevent the object from being extracted

@@ -19,9 +19,11 @@ package cacher
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"google.golang.org/grpc/metadata"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -29,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/storage"
+	"k8s.io/apiserver/pkg/storage/etcd3"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/consistencydetector"
@@ -44,6 +47,12 @@ type listerWatcher struct {
 
 	unsupportedWatchListSemantics    bool
 	watchListConsistencyCheckEnabled bool
+
+	// Identity hooks for multicluster deployments. When set, List()
+	// annotates decoded items with their storage key and cluster ID
+	// so the watchCache can index them correctly.
+	identityFromKey func(key string) string
+	wrapObject      func(obj runtime.Object, key string, clusterID string) runtime.Object
 }
 
 // NewListerWatcher returns a storage.Interface backed ListerWatcher.
@@ -95,13 +104,72 @@ func (lw *listerWatcher) List(options metav1.ListOptions) (runtime.Object, error
 	}
 
 	ctx := context.Background()
+
+	// Capture key mapping during GetList decode for identity annotation.
+	var keyMap map[string]string
+	if lw.identityFromKey != nil && lw.wrapObject != nil {
+		keyMap = make(map[string]string)
+		ctx = etcd3.WithDecodeCallback(ctx, func(obj runtime.Object, storageKey string, modRev int64) {
+			accessor, err := meta.Accessor(obj)
+			if err != nil {
+				return
+			}
+			id := strconv.FormatInt(modRev, 10) + "|" + accessor.GetNamespace() + "|" + accessor.GetName()
+			keyMap[id] = storageKey
+		})
+	}
+
 	if lw.contextMetadata != nil {
 		ctx = metadata.NewOutgoingContext(ctx, lw.contextMetadata)
 	}
 	if err := lw.storage.GetList(ctx, lw.resourcePrefix, storageOpts, list); err != nil {
 		return nil, err
 	}
+
+	// Annotate items with identity if hooks are configured.
+	if keyMap != nil && len(keyMap) > 0 {
+		return lw.annotateListItems(list, keyMap)
+	}
 	return list, nil
+}
+
+// annotateListItems wraps each item in the list with its cluster identity
+// envelope, matching items to their storage keys via the decode callback map.
+func (lw *listerWatcher) annotateListItems(list runtime.Object, keyMap map[string]string) (runtime.Object, error) {
+	items, err := meta.ExtractList(list)
+	if err != nil {
+		return list, nil // fallback to unwrapped
+	}
+
+	wrapped := &identityAnnotatedList{}
+	listAccessor, _ := meta.ListAccessor(list)
+	if listAccessor != nil {
+		wrapped.ResourceVersion = listAccessor.GetResourceVersion()
+		wrapped.Continue = listAccessor.GetContinue()
+		wrapped.RemainingItemCount = listAccessor.GetRemainingItemCount()
+	}
+
+	for _, item := range items {
+		accessor, err := meta.Accessor(item)
+		if err != nil {
+			wrapped.Items = append(wrapped.Items, item)
+			continue
+		}
+		rv := accessor.GetResourceVersion()
+		ns := accessor.GetNamespace()
+		name := accessor.GetName()
+		id := rv + "|" + ns + "|" + name
+
+		storageKey, ok := keyMap[id]
+		if !ok {
+			wrapped.Items = append(wrapped.Items, item)
+			continue
+		}
+
+		clusterID := lw.identityFromKey(storageKey)
+		wrapped.Items = append(wrapped.Items, lw.wrapObject(item, storageKey, clusterID))
+	}
+	return wrapped, nil
 }
 
 // Implements cache.ListerWatcher interface.

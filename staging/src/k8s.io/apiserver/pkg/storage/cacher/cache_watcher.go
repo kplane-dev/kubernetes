@@ -85,6 +85,10 @@ type cacheWatcher struct {
 
 	// state holds a numeric value indicating the current state of the watcher
 	state int
+
+	// wrapWatchObject wraps objects with cluster identity at the watch output boundary.
+	// nil for single-cluster deployments.
+	wrapWatchObject func(runtime.Object, string, string) runtime.Object
 }
 
 func newCacheWatcher(
@@ -383,9 +387,17 @@ func (c *cacheWatcher) convertToWatchEvent(event *watchCacheEvent) *watch.Event 
 
 	switch {
 	case curObjPasses && !oldObjPasses:
-		return &watch.Event{Type: watch.Added, Object: getMutableObject(event.Object)}
+		obj := getMutableObject(event.Object)
+		if c.wrapWatchObject != nil && event.ClusterID != "" {
+			obj = c.wrapWatchObject(obj, event.Key, event.ClusterID)
+		}
+		return &watch.Event{Type: watch.Added, Object: obj}
 	case curObjPasses && oldObjPasses:
-		return &watch.Event{Type: watch.Modified, Object: getMutableObject(event.Object)}
+		obj := getMutableObject(event.Object)
+		if c.wrapWatchObject != nil && event.ClusterID != "" {
+			obj = c.wrapWatchObject(obj, event.Key, event.ClusterID)
+		}
+		return &watch.Event{Type: watch.Modified, Object: obj}
 	case !curObjPasses && oldObjPasses:
 		// return a delete event with the previous object content, but with the event's resource version
 		oldObj := getMutableObject(event.PrevObject)
@@ -394,6 +406,9 @@ func (c *cacheWatcher) convertToWatchEvent(event *watchCacheEvent) *watch.Event 
 		// we don't need to update it. However, since cachingObject efficiently
 		// handles noop updates, we avoid this microoptimization here.
 		updateResourceVersion(oldObj, c.versioner, event.ResourceVersion)
+		if c.wrapWatchObject != nil && event.ClusterID != "" {
+			oldObj = c.wrapWatchObject(oldObj, event.Key, event.ClusterID)
+		}
 		return &watch.Event{Type: watch.Deleted, Object: oldObj}
 	}
 

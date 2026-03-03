@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -79,6 +80,9 @@ type watchCacheEvent struct {
 	Key             string
 	ResourceVersion uint64
 	RecordTime      time.Time
+	// ClusterID is the cluster identity derived from the storage key layout.
+	// Empty for single-cluster deployments.
+	ClusterID string
 }
 
 // watchCache implements a Store interface.
@@ -152,6 +156,22 @@ type watchCache struct {
 	// For testing cache interval invalidation.
 	indexValidator indexValidator
 
+	// identityFromKey derives a cluster identity string from a storage key.
+	// nil for single-cluster deployments.
+	identityFromKey func(key string) string
+
+	// unwrapObject extracts the inner object from an identity envelope.
+	// Called before storing objects so that Get/GetList return raw objects.
+	// nil for single-cluster deployments.
+	unwrapObject func(runtime.Object) runtime.Object
+
+	// expectedType is the reflect.Type of the raw object expected after
+	// unwrapping. When unwrapObject is configured, the reflector's own
+	// type check is disabled (because it sees the wrapper type), so we
+	// re-check here after unwrapping to preserve the same safety guarantee.
+	// nil skips the check.
+	expectedType reflect.Type
+
 	// Requests progress notification if there are requests waiting for watch
 	// to be fresh
 	waitingUntilFresh *progress.ConditionalProgressRequester
@@ -174,11 +194,17 @@ func newWatchCache(
 	groupResource schema.GroupResource,
 	progressRequester *progress.ConditionalProgressRequester,
 	getCurrentRV func(context.Context) (uint64, error),
+	identityFromKey func(key string) string,
+	unwrapObject func(runtime.Object) runtime.Object,
+	expectedType reflect.Type,
 ) *watchCache {
 	wc := &watchCache{
 		capacity:            defaultLowerBoundCapacity,
 		keyFunc:             keyFunc,
 		getAttrsFunc:        getAttrsFunc,
+		identityFromKey:     identityFromKey,
+		unwrapObject:        unwrapObject,
+		expectedType:        expectedType,
 		cache:               make([]*watchCacheEvent, defaultLowerBoundCapacity),
 		lowerBoundCapacity:  defaultLowerBoundCapacity,
 		upperBoundCapacity:  capacityUpperBound(eventFreshDuration),
@@ -287,8 +313,25 @@ func (w *watchCache) processEvent(event watch.Event, resourceVersion uint64, upd
 	if err != nil {
 		return fmt.Errorf("couldn't compute key: %v", err)
 	}
-	elem := &store.Element{Key: key, Object: event.Object}
-	elem.Labels, elem.Fields, err = w.getAttrsFunc(event.Object)
+	var clusterID string
+	if w.identityFromKey != nil {
+		clusterID = w.identityFromKey(key)
+	}
+
+	// Unwrap identity envelope before storing in cache so that
+	// Get/GetList return raw Kubernetes objects.
+	object := event.Object
+	if w.unwrapObject != nil {
+		object = w.unwrapObject(object)
+	}
+	if w.expectedType != nil {
+		if a := reflect.TypeOf(object); a != w.expectedType {
+			return fmt.Errorf("unexpected object type after unwrap: expected %v, got %v", w.expectedType, a)
+		}
+	}
+
+	elem := &store.Element{Key: key, Object: object, ClusterID: clusterID}
+	elem.Labels, elem.Fields, err = w.getAttrsFunc(object)
 	if err != nil {
 		return err
 	}
@@ -301,6 +344,7 @@ func (w *watchCache) processEvent(event watch.Event, resourceVersion uint64, upd
 		Key:             key,
 		ResourceVersion: resourceVersion,
 		RecordTime:      w.clock.Now(),
+		ClusterID:       clusterID,
 	}
 
 	// We can call w.store.Get() outside of a critical section,
@@ -749,15 +793,32 @@ func (w *watchCache) Replace(objs []interface{}, resourceVersion string) error {
 		if err != nil {
 			return fmt.Errorf("couldn't compute key: %v", err)
 		}
-		objLabels, objFields, err := w.getAttrsFunc(object)
+		var clusterID string
+		if w.identityFromKey != nil {
+			clusterID = w.identityFromKey(key)
+		}
+
+		// Unwrap identity envelope before storing in cache.
+		storeObj := object
+		if w.unwrapObject != nil {
+			storeObj = w.unwrapObject(object)
+		}
+		if w.expectedType != nil {
+			if a := reflect.TypeOf(storeObj); a != w.expectedType {
+				return fmt.Errorf("unexpected object type after unwrap: expected %v, got %v", w.expectedType, a)
+			}
+		}
+
+		objLabels, objFields, err := w.getAttrsFunc(storeObj)
 		if err != nil {
 			return err
 		}
 		toReplace = append(toReplace, &store.Element{
-			Key:    key,
-			Object: object,
-			Labels: objLabels,
-			Fields: objFields,
+			Key:       key,
+			Object:    storeObj,
+			Labels:    objLabels,
+			Fields:    objFields,
+			ClusterID: clusterID,
 		})
 	}
 

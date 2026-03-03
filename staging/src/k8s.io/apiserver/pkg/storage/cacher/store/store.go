@@ -95,6 +95,10 @@ type Element struct {
 	Object runtime.Object
 	Labels labels.Set
 	Fields fields.Set
+	// ClusterID is the cluster identity derived from the storage key layout.
+	// Empty for single-cluster deployments. Populated by the cacher when
+	// IdentityFromKey is configured.
+	ClusterID string
 }
 
 func ElementKey(obj interface{}) (string, error) {

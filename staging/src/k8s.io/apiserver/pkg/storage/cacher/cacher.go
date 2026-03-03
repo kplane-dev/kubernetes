@@ -120,6 +120,21 @@ type Config struct {
 	Codec runtime.Codec
 
 	Clock clock.WithTicker
+
+	// IdentityFromKey derives a cluster identity string from a storage key.
+	// Used in multicluster deployments where the key layout encodes cluster ID
+	// (e.g., /pods/clusters/<clusterID>/ns/name). nil for single-cluster.
+	IdentityFromKey func(key string) string
+
+	// WrapWatchObject wraps a runtime.Object with cluster identity metadata
+	// before it is sent to watch consumers. The function receives the object,
+	// storage key, and cluster ID. nil for single-cluster.
+	WrapWatchObject func(object runtime.Object, key string, clusterID string) runtime.Object
+
+	// UnwrapObject extracts the inner object from an identity envelope.
+	// Called before storing objects in the watch cache so that Get/GetList
+	// return raw Kubernetes objects. nil for single-cluster deployments.
+	UnwrapObject func(obj runtime.Object) runtime.Object
 }
 
 type watchersMap map[int]*cacheWatcher
@@ -322,6 +337,9 @@ type Cacher struct {
 	// timer is used to avoid unnecessary allocations in underlying watchers.
 	timer *time.Timer
 
+	// wrapWatchObject wraps objects with cluster identity at the watch output boundary.
+	wrapWatchObject func(runtime.Object, string, string) runtime.Object
+
 	// dispatching determines whether there is currently dispatching of
 	// any event in flight.
 	dispatching bool
@@ -386,16 +404,17 @@ func NewCacherFromConfig(config Config) (*Cacher, error) {
 		return nil, fmt.Errorf("resourcePrefix needs to start from /")
 	}
 	cacher := &Cacher{
-		resourcePrefix: resourcePrefix,
-		ready:          newReady(config.Clock),
-		storage:        config.Storage,
-		objectType:     objType,
-		groupResource:  config.GroupResource,
-		versioner:      config.Versioner,
-		newFunc:        config.NewFunc,
-		newListFunc:    config.NewListFunc,
-		indexedTrigger: indexedTrigger,
-		watcherIdx:     0,
+		resourcePrefix:  resourcePrefix,
+		ready:           newReady(config.Clock),
+		storage:         config.Storage,
+		objectType:      objType,
+		groupResource:   config.GroupResource,
+		versioner:       config.Versioner,
+		newFunc:         config.NewFunc,
+		newListFunc:     config.NewListFunc,
+		indexedTrigger:  indexedTrigger,
+		wrapWatchObject: config.WrapWatchObject,
+		watcherIdx:      0,
 		watchers: indexedWatchers{
 			allWatchers:   make(map[namespacedName]watchersMap),
 			valueWatchers: make(map[string]watchersMap),
@@ -434,13 +453,39 @@ func NewCacherFromConfig(config Config) (*Cacher, error) {
 	}
 
 	progressRequester := progress.NewConditionalProgressRequester(config.Storage.RequestWatchProgress, config.Clock, contextMetadata)
+
+	// When unwrapObject is configured, the reflector's own type check is
+	// disabled because it sees the wrapper type (ObjectWithClusterIdentity).
+	// Instead, the watchCache checks the type AFTER unwrapping so the same
+	// safety guarantee is preserved at the correct boundary.
+	var watchCacheExpectedType reflect.Type
+	if config.UnwrapObject != nil {
+		watchCacheExpectedType = reflect.TypeOf(obj)
+	}
+
 	watchCache := newWatchCache(
 		config.KeyFunc, cacher.processEvent, config.GetAttrsFunc, config.Versioner, config.Indexers,
-		config.Clock, eventFreshDuration, config.GroupResource, progressRequester, config.Storage.GetCurrentResourceVersion)
-	listerWatcher := NewListerWatcher(config.Storage, resourcePrefix, config.NewListFunc, contextMetadata)
+		config.Clock, eventFreshDuration, config.GroupResource, progressRequester, config.Storage.GetCurrentResourceVersion,
+		config.IdentityFromKey, config.UnwrapObject, watchCacheExpectedType)
+	lw := NewListerWatcher(config.Storage, resourcePrefix, config.NewListFunc, contextMetadata)
+	if config.IdentityFromKey != nil && config.WrapWatchObject != nil {
+		if concrete, ok := lw.(*listerWatcher); ok {
+			concrete.identityFromKey = config.IdentityFromKey
+			concrete.wrapObject = config.WrapWatchObject
+		}
+	}
+	listerWatcher := lw
 	reflectorName := "storage/cacher.go:" + resourcePrefix
 
-	reflector := cache.NewNamedReflector(reflectorName, listerWatcher, obj, watchCache, 0)
+	// When identity hooks are configured, the etcd3 watcher wraps decoded
+	// objects in an identity envelope. The reflector's type check must be
+	// disabled here because it would reject the wrapper type. The watchCache
+	// performs the equivalent check after unwrapping (see watchCacheExpectedType).
+	var reflectorExpectedType runtime.Object
+	if config.UnwrapObject == nil {
+		reflectorExpectedType = obj
+	}
+	reflector := cache.NewNamedReflector(reflectorName, listerWatcher, reflectorExpectedType, watchCache, 0)
 	// Configure reflector's pager to for an appropriate pagination chunk size for fetching data from
 	// storage. The pager falls back to full list if paginated list calls fail due to an "Expired" error.
 	reflector.WatchListPageSize = storageWatchListPageSize
@@ -652,6 +697,7 @@ func (c *Cacher) Watch(ctx context.Context, key string, opts storage.ListOptions
 
 		// Update watcher.forget function once we can compute it.
 		watcher.forget = forgetWatcher(c, watcher, c.watcherIdx, scope, triggerValue, triggerSupported)
+		watcher.wrapWatchObject = c.wrapWatchObject
 		// Update the bookMarkAfterResourceVersion
 		watcher.setBookmarkAfterResourceVersion(bookmarkAfterResourceVersionFn())
 		c.watchers.addWatcher(watcher, c.watcherIdx, scope, triggerValue, triggerSupported)

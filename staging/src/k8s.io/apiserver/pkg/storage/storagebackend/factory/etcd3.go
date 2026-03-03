@@ -467,6 +467,9 @@ func newETCD3Storage(c storagebackend.ConfigForResource, newFunc, newListFunc fu
 		_ = client.Close()
 		return nil, nil, err
 	}
+	if c.WrapDecodedObject != nil {
+		store.SetWrapDecodedObject(c.WrapDecodedObject)
+	}
 	var once sync.Once
 	destroyFunc := func() {
 		// we know that storage destroy funcs are called multiple times (due to reuse in subresources).
