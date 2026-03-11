@@ -19,23 +19,19 @@ package etcd3
 import (
 	"context"
 
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/storage"
 )
 
-type decodeCallbackKeyType struct{}
+// DecodeCallback is an alias for storage.DecodeCallback.
+// Deprecated: use storage.DecodeCallback directly.
+type DecodeCallback = storage.DecodeCallback
 
-// DecodeCallback is called for each item decoded during GetList,
-// providing the decoded object, its storage-relative key (etcd prefix
-// stripped), and the etcd mod revision.
-type DecodeCallback func(obj runtime.Object, storageKey string, modRevision int64)
-
-// WithDecodeCallback returns a context that carries a DecodeCallback.
-// The callback will be invoked for each item decoded in GetList.
+// WithDecodeCallback is an alias for storage.WithDecodeCallback.
+// Deprecated: use storage.WithDecodeCallback directly.
 func WithDecodeCallback(ctx context.Context, cb DecodeCallback) context.Context {
-	return context.WithValue(ctx, decodeCallbackKeyType{}, cb)
+	return storage.WithDecodeCallback(ctx, cb)
 }
 
 func decodeCallbackFromContext(ctx context.Context) DecodeCallback {
-	cb, _ := ctx.Value(decodeCallbackKeyType{}).(DecodeCallback)
-	return cb
+	return storage.DecodeCallbackFromContext(ctx)
 }
