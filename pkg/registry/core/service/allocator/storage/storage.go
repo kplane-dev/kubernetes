@@ -60,6 +60,19 @@ type Etcd struct {
 var _ allocator.Interface = &Etcd{}
 var _ rangeallocation.RangeRegistry = &Etcd{}
 
+// NewWithStorage returns an allocator backed by an existing storage.Interface.
+// This allows callers to use a storage backend other than etcd (e.g. Spanner).
+func NewWithStorage(alloc allocator.Snapshottable, baseKey string,
+	store storage.Interface, resource schema.GroupResource) *Etcd {
+	return &Etcd{
+		alloc:     alloc,
+		storage:   store,
+		baseKey:   baseKey,
+		resource:  resource,
+		destroyFn: func() {},
+	}
+}
+
 // NewEtcd returns an allocator that is backed by Etcd and can manage
 // persisting the snapshot state of allocation after each allocation is made.
 func NewEtcd(alloc allocator.Snapshottable, baseKey string, config *storagebackend.ConfigForResource) (*Etcd, error) {

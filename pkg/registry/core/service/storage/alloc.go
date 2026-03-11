@@ -55,6 +55,11 @@ type ServiceNodePort struct {
 
 // This is a trasitionary function to facilitate service REST flattening.
 func makeAlloc(defaultFamily api.IPFamily, ipAllocs map[api.IPFamily]ipallocator.Interface, portAlloc portallocator.Interface) Allocators {
+	return MakeAllocators(defaultFamily, ipAllocs, portAlloc)
+}
+
+// MakeAllocators constructs an Allocators from the given IP and port allocators.
+func MakeAllocators(defaultFamily api.IPFamily, ipAllocs map[api.IPFamily]ipallocator.Interface, portAlloc portallocator.Interface) Allocators {
 	return Allocators{
 		defaultServiceIPFamily:      defaultFamily,
 		serviceIPAllocatorsByFamily: ipAllocs,

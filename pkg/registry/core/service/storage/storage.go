@@ -62,6 +62,9 @@ type REST struct {
 	primaryIPFamily   api.IPFamily
 	secondaryIPFamily api.IPFamily
 	alloc             Allocators
+	// ClusterAllocators, if set, returns per-cluster allocators resolved from
+	// the request context. When nil, the shared alloc field is used.
+	ClusterAllocators func(ctx context.Context) *Allocators
 	endpoints         EndpointsStorage
 	pods              PodStorage
 	proxyTransport    http.RoundTripper
@@ -330,7 +333,18 @@ func (r *REST) defaultOnReadIPFamilies(service *api.Service) {
 	}
 }
 
-func (r *REST) afterDelete(obj runtime.Object, options *metav1.DeleteOptions) {
+// allocForContext returns per-cluster allocators when ClusterAllocators is set,
+// falling back to the shared alloc field.
+func (r *REST) allocForContext(ctx context.Context) *Allocators {
+	if r.ClusterAllocators != nil {
+		if a := r.ClusterAllocators(ctx); a != nil {
+			return a
+		}
+	}
+	return &r.alloc
+}
+
+func (r *REST) afterDelete(ctx context.Context, obj runtime.Object, options *metav1.DeleteOptions) {
 	svc := obj.(*api.Service)
 
 	// Normally this defaulting is done automatically, but the hook (Decorator)
@@ -340,19 +354,17 @@ func (r *REST) afterDelete(obj runtime.Object, options *metav1.DeleteOptions) {
 
 	// Only perform the cleanup if this is a non-dryrun deletion
 	if !dryrun.IsDryRun(options.DryRun) {
-		// It would be better if we had the caller context, but that changes
-		// this hook signature.
-		ctx := genericapirequest.WithNamespace(genericapirequest.NewContext(), svc.Namespace)
+		nsCtx := genericapirequest.WithNamespace(genericapirequest.NewContext(), svc.Namespace)
 		// TODO: This is clumsy.  It was added for fear that the endpoints
 		// controller might lag, and we could end up rusing the service name
 		// with old endpoints.  We should solve that better and remove this, or
 		// else we should do this for EndpointSlice, too.
-		_, _, err := r.endpoints.Delete(ctx, svc.Name, rest.ValidateAllObjectFunc, &metav1.DeleteOptions{})
+		_, _, err := r.endpoints.Delete(nsCtx, svc.Name, rest.ValidateAllObjectFunc, &metav1.DeleteOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			klog.Errorf("delete service endpoints %s/%s failed: %v", svc.Name, svc.Namespace, err)
 		}
 
-		r.alloc.releaseAllocatedResources(svc)
+		r.allocForContext(ctx).releaseAllocatedResources(svc)
 	}
 }
 
@@ -368,7 +380,7 @@ func (r *REST) beginCreate(ctx context.Context, obj runtime.Object, options *met
 	// it manually. This has to happen here and not in any earlier hooks (e.g.
 	// defaulting) because it needs to be aware of flags and be able to access
 	// API storage.
-	txn, err := r.alloc.allocateCreate(svc, dryrun.IsDryRun(options.DryRun))
+	txn, err := r.allocForContext(ctx).allocateCreate(svc, dryrun.IsDryRun(options.DryRun))
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +415,7 @@ func (r *REST) beginUpdate(ctx context.Context, obj, oldObj runtime.Object, opti
 	normalizeClusterIPs(After{newSvc}, Before{oldSvc})
 
 	// Allocate and initialize fields.
-	txn, err := r.alloc.allocateUpdate(After{newSvc}, Before{oldSvc}, dryrun.IsDryRun(options.DryRun))
+	txn, err := r.allocForContext(ctx).allocateUpdate(After{newSvc}, Before{oldSvc}, dryrun.IsDryRun(options.DryRun))
 	if err != nil {
 		return nil, err
 	}

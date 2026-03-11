@@ -1318,7 +1318,7 @@ func TestStoreDelete(t *testing.T) {
 	defer destroyFunc()
 
 	afterWasCalled := false
-	registry.AfterDelete = func(obj runtime.Object, options *metav1.DeleteOptions) {
+	registry.AfterDelete = func(_ context.Context, obj runtime.Object, options *metav1.DeleteOptions) {
 		afterWasCalled = true
 	}
 
@@ -1464,7 +1464,7 @@ func TestGracefulStoreHandleFinalizers(t *testing.T) {
 	defer destroyFunc()
 
 	afterWasCalled := false
-	registry.AfterDelete = func(obj runtime.Object, options *metav1.DeleteOptions) {
+	registry.AfterDelete = func(_ context.Context, obj runtime.Object, options *metav1.DeleteOptions) {
 		afterWasCalled = true
 	}
 
@@ -1546,7 +1546,7 @@ func TestNonGracefulStoreHandleFinalizers(t *testing.T) {
 	defer destroyFunc()
 
 	afterWasCalled := false
-	registry.AfterDelete = func(obj runtime.Object, options *metav1.DeleteOptions) {
+	registry.AfterDelete = func(_ context.Context, obj runtime.Object, options *metav1.DeleteOptions) {
 		afterWasCalled = true
 	}
 
