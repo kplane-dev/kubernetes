@@ -486,6 +486,20 @@ func NewCacherFromConfig(config Config) (*Cacher, error) {
 		reflectorExpectedType = obj
 	}
 	reflector := cache.NewNamedReflector(reflectorName, listerWatcher, reflectorExpectedType, watchCache, 0)
+	// When cluster identity hooks are configured, the WatchList stream contains
+	// wrapped objects that share the same namespace/name across clusters. Use the
+	// cacher's key function (which includes cluster identity) for the reflector's
+	// temporary store to prevent cross-cluster deduplication.
+	if config.IdentityFromKey != nil {
+		cacherKeyFunc := config.KeyFunc
+		reflector.WatchListKeyFunc = func(obj interface{}) (string, error) {
+			rObj, ok := obj.(runtime.Object)
+			if !ok {
+				return "", fmt.Errorf("object does not implement runtime.Object: %T", obj)
+			}
+			return cacherKeyFunc(rObj)
+		}
+	}
 	// Configure reflector's pager to for an appropriate pagination chunk size for fetching data from
 	// storage. The pager falls back to full list if paginated list calls fail due to an "Expired" error.
 	reflector.WatchListPageSize = storageWatchListPageSize

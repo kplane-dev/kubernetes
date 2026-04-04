@@ -131,6 +131,13 @@ type Reflector struct {
 	// maxWatchTimeout defines the maximum timeout for watch requests.
 	// Actual timeout is random in [minWatchTimeout, maxWatchTimeout].
 	maxWatchTimeout time.Duration
+	// WatchListKeyFunc, when set, overrides the default key function used
+	// for the temporary store during WatchList initial sync. This allows
+	// callers that wrap objects with additional identity metadata to
+	// prevent deduplication of objects that share the same namespace/name
+	// but belong to different scopes.
+	WatchListKeyFunc KeyFunc
+
 	// clock allows tests to manipulate time
 	clock clock.Clock
 	// paginatedResult defines whether pagination should be forced for list calls.
@@ -842,7 +849,11 @@ func (r *Reflector) watchList(ctx context.Context) (watch.Interface, error) {
 
 		resourceVersion = ""
 		lastKnownRV := r.rewatchResourceVersion()
-		temporaryStore = NewStore(DeletionHandlingMetaNamespaceKeyFunc, storeOpts...)
+		keyFn := DeletionHandlingMetaNamespaceKeyFunc
+		if r.WatchListKeyFunc != nil {
+			keyFn = r.WatchListKeyFunc
+		}
+		temporaryStore = NewStore(keyFn, storeOpts...)
 		// TODO(#115478): large "list", slow clients, slow network, p&f
 		//  might slow down streaming and eventually fail.
 		//  maybe in such a case we should retry with an increased timeout?
