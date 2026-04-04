@@ -86,6 +86,10 @@ type ServicesConfig struct {
 	NodePortRange           utilnet.PortRange
 
 	IPRepairInterval time.Duration
+
+	// ServiceRESTHook, if set, is called after the service REST storage is created.
+	// This allows external code to configure per-cluster allocators.
+	ServiceRESTHook func(rest *servicestore.REST)
 }
 
 type rangeRegistries struct {
@@ -212,6 +216,9 @@ func (p *legacyProvider) NewRESTStorage(apiResourceConfigSource serverstorage.AP
 		p.Proxy.Transport)
 	if err != nil {
 		return genericapiserver.APIGroupInfo{}, err
+	}
+	if p.Services.ServiceRESTHook != nil {
+		p.Services.ServiceRESTHook(serviceRESTStorage)
 	}
 
 	storage := apiGroupInfo.VersionedResourcesStorageMap["v1"]

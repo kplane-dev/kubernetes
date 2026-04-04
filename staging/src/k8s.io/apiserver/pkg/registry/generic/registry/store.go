@@ -60,7 +60,7 @@ import (
 type FinishFunc func(ctx context.Context, success bool)
 
 // AfterDeleteFunc is the type used for the Store.AfterDelete hook.
-type AfterDeleteFunc func(obj runtime.Object, options *metav1.DeleteOptions)
+type AfterDeleteFunc func(ctx context.Context, obj runtime.Object, options *metav1.DeleteOptions)
 
 // BeginCreateFunc is the type used for the Store.BeginCreate hook.
 type BeginCreateFunc func(ctx context.Context, obj runtime.Object, options *metav1.CreateOptions) (FinishFunc, error)
@@ -1385,7 +1385,7 @@ func (e *Store) DeleteCollection(ctx context.Context, deleteValidation rest.Vali
 // returns the decorated deleted object if appropriate.
 func (e *Store) finalizeDelete(ctx context.Context, obj runtime.Object, runHooks bool, options *metav1.DeleteOptions) (runtime.Object, error) {
 	if runHooks && e.AfterDelete != nil {
-		e.AfterDelete(obj, options)
+		e.AfterDelete(ctx, obj, options)
 	}
 	if e.ReturnDeletedObject {
 		if e.Decorator != nil {
