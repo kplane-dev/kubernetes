@@ -31,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/features"
 	"k8s.io/apiserver/pkg/storage"
-	"k8s.io/apiserver/pkg/storage/etcd3"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/consistencydetector"
@@ -109,7 +108,7 @@ func (lw *listerWatcher) List(options metav1.ListOptions) (runtime.Object, error
 	var keyMap map[string]string
 	if lw.identityFromKey != nil && lw.wrapObject != nil {
 		keyMap = make(map[string]string)
-		ctx = etcd3.WithDecodeCallback(ctx, func(obj runtime.Object, storageKey string, modRev int64) {
+		ctx = storage.WithDecodeCallback(ctx, func(obj runtime.Object, storageKey string, modRev int64) {
 			accessor, err := meta.Accessor(obj)
 			if err != nil {
 				return

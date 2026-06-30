@@ -41,6 +41,15 @@ var (
 	DefaultFeatureSupportChecker FeatureSupportChecker = newDefaultFeatureSupportChecker()
 )
 
+// SetFeatureSupported explicitly marks a feature as supported in the default
+// checker. Used by non-etcd storage backends (e.g. Spanner) that implement
+// features like RequestWatchProgress natively.
+func SetFeatureSupported(feature storage.Feature, supported bool) {
+	if d, ok := DefaultFeatureSupportChecker.(*defaultFeatureSupportChecker); ok {
+		d.SetSupported(feature, supported)
+	}
+}
+
 // FeatureSupportChecker to define Supports functions.
 type FeatureSupportChecker interface {
 	// Supports check if the feature is supported or not by checking internal cache.
@@ -61,12 +70,17 @@ type FeatureSupportChecker interface {
 type defaultFeatureSupportChecker struct {
 	lock                    sync.Mutex
 	progressNotifySupported *bool
-	checkingEndpoint        map[string]struct{}
+	// forcedFeatures overrides etcd-detected support. Once a feature is
+	// force-set, CheckClient cannot override it. Used by non-etcd storage
+	// backends (e.g. Spanner) that implement features natively.
+	forcedFeatures map[storage.Feature]bool
+	checkingEndpoint map[string]struct{}
 }
 
 func newDefaultFeatureSupportChecker() *defaultFeatureSupportChecker {
 	return &defaultFeatureSupportChecker{
 		checkingEndpoint: make(map[string]struct{}),
+		forcedFeatures:   make(map[storage.Feature]bool),
 	}
 }
 
@@ -77,11 +91,24 @@ func (f *defaultFeatureSupportChecker) Supports(feature storage.Feature) bool {
 		f.lock.Lock()
 		defer f.lock.Unlock()
 
+		if v, ok := f.forcedFeatures[feature]; ok {
+			return v
+		}
 		return ptr.Deref(f.progressNotifySupported, false)
 	default:
 		runtime.HandleError(fmt.Errorf("feature %q is not implemented in DefaultFeatureSupportChecker", feature))
 		return false
 	}
+}
+
+// SetSupported explicitly marks a feature as supported, overriding any
+// etcd-detected value. Once set, CheckClient cannot override it. This is
+// used by non-etcd storage backends (e.g. Spanner) that implement the
+// feature natively.
+func (f *defaultFeatureSupportChecker) SetSupported(feature storage.Feature, supported bool) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	f.forcedFeatures[feature] = supported
 }
 
 // CheckClient accepts client and calculate the support per endpoint and caches it.
